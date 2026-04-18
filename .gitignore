@@ -1,0 +1,15 @@
+# Secrets
+.env
+*.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.log
+
+# Docker
+*.override.yml

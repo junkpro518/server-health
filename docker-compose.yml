@@ -1,0 +1,30 @@
+services:
+  health-bot:
+    build: .
+    image: server-health-bot:latest
+    container_name: health-bot
+    restart: unless-stopped
+
+    env_file: .env
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /opt/scripts:/opt/scripts:ro
+      - /opt/projects:/opt/projects:ro
+      - /opt/apps:/opt/apps:ro
+      - /opt/proxy:/opt/proxy:ro
+      - /usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro
+
+    pid: host
+    network_mode: host
+
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: '0.1'
+
+    logging:
+      options:
+        max-size: "5m"
+        max-file: "2"
