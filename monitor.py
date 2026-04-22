@@ -244,6 +244,7 @@ def polling_loop():
                                      args=(text, chat_id), daemon=True).start()
         except Exception as e:
             print(f"[polling error] {e}")
+            notify_error("polling_loop", e)
             time.sleep(5)
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -350,14 +351,77 @@ def daily_report():
     send(snapshot)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+# ── Error notification with per-type cooldown ────────────────────────────────
+import traceback as _tb
+
+_err_last: dict = {}
+_ERR_COOLDOWN = 300  # 5 min per error type
+
+def notify_error(where: str, exc: Exception):
+    etype = type(exc).__name__
+    now = time.time()
+    if now - _err_last.get(etype, 0) < _ERR_COOLDOWN:
+        return
+    _err_last[etype] = now
+    tb = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))[-1200:]
+    # HTML-escape manually (avoid adding deps)
+    safe = (tb.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    msg = f"🚨 <b>Health Bot error</b>\n<b>Where:</b> {where}\n<b>Type:</b> <code>{etype}</code>\n<pre>{safe}</pre>"
+    try: send(msg)
+    except Exception as e: print(f"[notify_error failed] {e}")
+
+
+# ── Health-check HTTP server (for Uptime Kuma) ──────────────────────────────
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+HEALTH_PORT = int(os.environ.get("HEALTH_PORT", "8089"))
+_health_state = {"polling_alive": False, "check_alive": False, "last_check": 0}
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/health":
+            self.send_response(404); self.end_headers(); return
+        now = time.time()
+        stale = (now - _health_state["last_check"]) > (CHECK_EVERY * 3)
+        ok = _health_state["polling_alive"] and _health_state["check_alive"] and not stale
+        body = json.dumps({
+            "status": "ok" if ok else "degraded",
+            "polling_alive": _health_state["polling_alive"],
+            "check_alive": _health_state["check_alive"],
+            "seconds_since_last_check": int(now - _health_state["last_check"]) if _health_state["last_check"] else -1,
+        }).encode()
+        self.send_response(200 if ok else 503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a, **k): return
+
+def start_health_server():
+    def _serve():
+        try:
+            HTTPServer(("0.0.0.0", HEALTH_PORT), _HealthHandler).serve_forever()
+        except Exception as e:
+            print(f"[health server error] {e}")
+    threading.Thread(target=_serve, name="health-http", daemon=True).start()
+    print(f"[health-bot] health endpoint on 0.0.0.0:{HEALTH_PORT}/health")
+
+
 def main():
     print(f"[health-bot] check={CHECK_EVERY}s report={REPORT_HOUR}:00UTC")
     send(f"🟢 <b>Health Bot بدأ</b>\nمراقبة نشطة ✅\n{ksa_time()} (KSA)\n\nاكتب /help للأوامر")
 
-    threading.Thread(target=polling_loop, daemon=True).start()
+    start_health_server()
+
+    def _polling_wrapper():
+        _health_state["polling_alive"] = True
+        try: polling_loop()
+        finally: _health_state["polling_alive"] = False
+
+    threading.Thread(target=_polling_wrapper, daemon=True).start()
 
     state = load_state()
     last_report_day = -1
+    _health_state["check_alive"] = True
 
     while True:
         now = datetime.now(timezone.utc)
@@ -367,8 +431,10 @@ def main():
         try:
             state = check_once(state)
             save_state(state)
+            _health_state["last_check"] = time.time()
         except Exception as e:
             print(f"[check error] {e}")
+            notify_error("check_loop", e)
         time.sleep(CHECK_EVERY)
 
 if __name__ == "__main__":
